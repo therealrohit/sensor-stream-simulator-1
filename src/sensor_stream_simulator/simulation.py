@@ -23,6 +23,11 @@ SCENARIOS = frozenset(
 )
 
 DEFAULT_START = datetime(2026, 1, 1, tzinfo=UTC)
+WATER_SPECIFIC_HEAT_J_KG_K = 4180.0
+REFERENCE_PUMP_SPEED_PERCENT = 60.0
+REFERENCE_FLOW_RATE_KG_S = 0.39
+REFERENCE_PRESSURE_DROP_KPA = 35.0
+MINIMUM_FLOW_RATE_KG_S = 0.015
 MEASUREMENT_FIELDS = (
     "inlet_temperature_c",
     "outlet_temperature_c",
@@ -42,6 +47,7 @@ class SensorReading:
     inlet_temperature_c: float | None
     outlet_temperature_c: float | None
     flow_rate_kg_s: float | None
+    synthetic_heat_load_w: float
     inlet_pressure_kpa: float | None
     outlet_pressure_kpa: float | None
     relative_humidity_percent: float | None
@@ -75,9 +81,11 @@ def generate_session(
 ) -> list[SensorReading]:
     """Generate a reproducible synthetic sensor session.
 
-    Relationships are intentionally simplified but coupled: flow follows pump
-    speed, pressure loss depends on flow and resistance, and fluid temperature
-    rise follows heat load divided by mass flow and specific heat.
+    Relationships are intentionally simplified but coupled. Scenario state is
+    set first, then flow is made proportional to pump speed and inversely
+    proportional to the square root of relative resistance. Pressure loss
+    follows resistance times flow squared, and fluid temperature rise follows
+    synthetic heat load divided by mass flow and specific heat.
     """
     if scenario not in SCENARIOS:
         choices = ", ".join(sorted(SCENARIOS))
@@ -98,11 +106,13 @@ def generate_session(
             20.0 + 0.25 * math.sin(index / 15) + generator.gauss(0.0, 0.08)
         )
         pump_speed = 60.0 + generator.gauss(0.0, 1.0)
-        flow_rate = max(0.03, 0.0065 * pump_speed + generator.gauss(0.0, 0.006))
+        flow_noise_fraction = generator.gauss(0.0, 0.015)
         heat_load_w = 10000.0 + generator.gauss(0.0, 180.0)
-        resistance_factor = 35.0
+        relative_resistance = 1.0
+        downstream_delivery_fraction = 1.0
         inlet_pressure = 300.0 + generator.gauss(0.0, 0.6)
         humidity = 45.0 + 1.5 * math.sin(index / 20) + generator.gauss(0.0, 0.25)
+        outlet_sensor_drift_c = 0.0
         leak_detected = False
         is_anomaly = False
         anomaly_type = "none"
@@ -114,59 +124,71 @@ def generate_session(
                 anomaly_type = "high_temperature"
         elif scenario == "restricted-flow" and progress >= 0.25:
             severity = (progress - 0.25) / 0.75
-            flow_rate *= 1.0 - 0.55 * severity
             pump_speed += 12.0 * severity
-            resistance_factor += 110.0 * severity
+            relative_resistance += 4.0 * severity
             if progress >= 0.4:
                 is_anomaly = True
                 anomaly_type = "restricted_flow"
         elif scenario == "pressure-drop-increase":
-            resistance_factor += 90.0 * progress
+            relative_resistance += 2.0 * progress
+            pump_speed += 10.0 * progress
             if progress >= 0.5:
                 is_anomaly = True
                 anomaly_type = "pressure_drop_increase"
         elif scenario == "sensor-drift" and progress >= 0.25:
-            drift = 4.0 * (progress - 0.25) / 0.75
+            outlet_sensor_drift_c = 4.0 * (progress - 0.25) / 0.75
             if progress >= 0.45:
                 is_anomaly = True
                 anomaly_type = "sensor_drift"
-        else:
-            drift = 0.0
-
-        if scenario == "pump-failure" and progress >= 0.5:
+        elif scenario == "pump-failure" and progress >= 0.5:
             severity = min(1.0, (progress - 0.5) / 0.15)
             pump_speed *= 1.0 - 0.92 * severity
-            flow_rate = max(0.015, flow_rate * (1.0 - 0.9 * severity))
             heat_load_w *= 1.0 - 0.75 * severity
             if severity >= 0.2:
                 is_anomaly = True
                 anomaly_type = "pump_failure"
-
-        if scenario == "leak-event" and progress >= 0.6:
+        elif scenario == "leak-event" and progress >= 0.6:
             severity = min(1.0, (progress - 0.6) / 0.15)
             leak_detected = True
-            flow_rate *= 1.0 - 0.28 * severity
+            downstream_delivery_fraction = 1.0 - 0.28 * severity
             inlet_pressure -= 45.0 * severity
             if severity >= 0.2:
                 is_anomaly = True
                 anomaly_type = "leak_event"
 
-        temperature_rise = heat_load_w / (max(flow_rate, 0.015) * 4180.0)
-        outlet_temperature = inlet_temperature + temperature_rise
-        if scenario == "sensor-drift":
-            outlet_temperature += drift
+        pump_speed = max(0.0, min(100.0, pump_speed))
+        ideal_flow_rate = (
+            REFERENCE_FLOW_RATE_KG_S
+            * (pump_speed / REFERENCE_PUMP_SPEED_PERCENT)
+            * downstream_delivery_fraction
+            / math.sqrt(relative_resistance)
+        )
+        flow_rate = max(
+            MINIMUM_FLOW_RATE_KG_S,
+            ideal_flow_rate * (1.0 + flow_noise_fraction),
+        )
 
-        pressure_drop = resistance_factor * (flow_rate / 0.4) ** 2
+        temperature_rise = heat_load_w / (flow_rate * WATER_SPECIFIC_HEAT_J_KG_K)
+        outlet_temperature = (
+            inlet_temperature + temperature_rise + outlet_sensor_drift_c
+        )
+
+        pressure_drop = (
+            REFERENCE_PRESSURE_DROP_KPA
+            * relative_resistance
+            * (flow_rate / REFERENCE_FLOW_RATE_KG_S) ** 2
+        )
         outlet_pressure = inlet_pressure - pressure_drop
 
         values: dict[str, float | None] = {
             "inlet_temperature_c": _rounded(inlet_temperature),
             "outlet_temperature_c": _rounded(outlet_temperature),
             "flow_rate_kg_s": _rounded(flow_rate),
+            "synthetic_heat_load_w": _rounded(heat_load_w),
             "inlet_pressure_kpa": _rounded(inlet_pressure),
             "outlet_pressure_kpa": _rounded(outlet_pressure),
             "relative_humidity_percent": _rounded(humidity),
-            "pump_speed_percent": _rounded(max(0.0, min(100.0, pump_speed))),
+            "pump_speed_percent": _rounded(pump_speed),
         }
 
         if scenario == "random-missing" and generator.random() < 0.12:
@@ -196,7 +218,11 @@ def write_csv(readings: list[SensorReading], output_path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     rows = [reading.to_mapping() for reading in readings]
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(rows[0]),
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
     return path.resolve()

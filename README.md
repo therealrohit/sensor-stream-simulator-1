@@ -19,19 +19,41 @@ an engineering software project.
 - Configurable sample count, interval, random seed, and ISO 8601 start time
 - CSV and JSON output
 - Scenario and ground-truth anomaly labels in every row
-- Coupled flow, pump, pressure-loss, heat-load, and temperature relationships
+- A clearly named `synthetic_heat_load_w` model input in every output row
+- Coupled flow, pump, resistance, pressure-loss, and temperature relationships
 - Fixed default start time and seeded randomness for full reproducibility
 - Committed example datasets and a matplotlib plotting script
 
 ## Technical approach
 
 The simulator uses Python's standard `random.Random` class with a local seeded
-generator. Pump speed influences flow, pipe resistance and flow influence
-pressure loss, and the outlet temperature rise is calculated from a simplified
-heat balance using water's approximate specific heat. Each scenario changes a
-small number of those variables so its behavior remains understandable.
+generator. Each scenario first sets pump speed, relative hydraulic resistance,
+synthetic heat load, and any downstream delivery loss. The generator then
+calculates flow, pressure drop, and outlet temperature in that order. This keeps
+the reported pump, flow, and pressure values tied to one simplified model.
 
-These relationships are simplified and are not a complete physical model.
+The core relationships are:
+
+```text
+flow = 0.39 kg/s × (pump speed / 60%) × downstream delivery fraction
+       / sqrt(relative resistance) × (1 + seeded flow noise)
+
+pressure drop = 35 kPa × relative resistance × (flow / 0.39 kg/s)²
+
+temperature rise = synthetic_heat_load_w / (flow × 4180 J/(kg·K))
+```
+
+Relative resistance is 1.0 in normal operation. Restricted-flow and
+pressure-drop-increase scenarios raise it; their synthetic pump controller also
+raises pump speed. Pump failure reduces commanded pump speed and the imposed
+heat load. The leak scenario reduces the fraction of flow delivered past the
+modeled leak location and lowers inlet pressure.
+
+`synthetic_heat_load_w` is an imposed ground-truth value created by the model.
+It is not measured electrical power, a calibrated sensor reading, or evidence
+from real cooling equipment. The relationships above are intentionally
+simplified and are not a pump curve, hydraulic solver, or complete physical
+model.
 
 ## Installation
 
@@ -84,8 +106,9 @@ Every output row contains:
 
 ```text
 timestamp, inlet_temperature_c, outlet_temperature_c, flow_rate_kg_s,
-inlet_pressure_kpa, outlet_pressure_kpa, relative_humidity_percent,
-pump_speed_percent, leak_detected, scenario, is_anomaly, anomaly_type
+synthetic_heat_load_w, inlet_pressure_kpa, outlet_pressure_kpa,
+relative_humidity_percent, pump_speed_percent, leak_detected, scenario,
+is_anomaly, anomaly_type
 ```
 
 Committed datasets:
@@ -95,7 +118,7 @@ Committed datasets:
 - `data/pump_failure.csv`
 - `data/leak_event.json`
 
-Plot the restricted-flow dataset:
+Plot the restricted-flow dataset, including its imposed synthetic heat load:
 
 ```bash
 python examples/plot_session.py
@@ -111,22 +134,29 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-The tests cover all scenarios, physical relationships, timestamps, file output,
-invalid inputs, CLI behavior, and exact reproducibility for equal seeds.
+The tests cover all eight scenarios, rounded heat-balance consistency, expected
+scenario trends, timestamps, file output, invalid inputs, CLI behavior, and
+exact reproducibility for equal seeds.
 
 ## Assumptions
 
 - Water has a constant approximate specific heat of 4180 J/(kg·K).
-- A steady synthetic heat load is applied within each sample.
-- Flow is related to pump speed with small measurement noise.
-- Pressure loss follows a simplified resistance-times-flow-squared relationship.
+- The exported heat load is synthetic ground truth imposed by the generator.
+- Flow scales with pump speed and inverse square-root relative resistance, with
+  small seeded noise.
+- Pressure loss follows a simplified relative-resistance-times-flow-squared
+  relationship.
 - Scenario transitions are intentionally smooth enough to inspect in a chart.
 
 ## Limitations
 
 - All values are synthetic and have not been measured on physical equipment.
 - The model omits control-loop dynamics, fluid-property variation, pipe geometry,
-  sensor calibration curves, and detailed pump performance.
+  sensor calibration curves, pump curves, and detailed pump performance.
+- Relative resistance and downstream delivery fraction are illustrative scenario
+  controls, not identified parameters from real equipment.
+- The sensor-drift scenario deliberately biases reported outlet temperature, so
+  its measured temperature rise no longer closes the underlying heat balance.
 - Ground-truth labels are known because the generator creates the anomalies; they
   do not represent the output of a detection algorithm.
 - The ranges are plausible examples, not specifications for a real system.
