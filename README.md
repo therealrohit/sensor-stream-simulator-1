@@ -57,6 +57,45 @@ model.
 
 ## Installation
 
+### C++20 streaming simulator
+
+The standalone C++ version requires CMake 3.20+ and a C++20 compiler. It uses
+only the standard library. Build and run its automated tests:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
+./build/sensor_simulator --frames 10000 --capacity 16
+./build/sensor_simulator --frames 10000 --capacity 4 --consumer-us 100 --drop-on-full
+```
+
+A producer generates synthetic temperature, pressure, and flow frames with a
+zero-based sequence number and simulated elapsed time in seconds. Each frame
+advances sample time by 1 ms; `--producer-us` controls wall-clock pacing
+independently. `--consumer-us` simulates processing latency. Both delays default
+to zero, and frame values are deterministic functions of sequence number.
+These illustrative signals do not implement the Python cooling-loop scenarios.
+
+Frames pass through a thread-safe, fixed-capacity ring buffer. The default
+policy blocks the producer when full. `--drop-on-full` rejects the newest frame
+instead; accepted frames retain their original sequence numbers, so gaps show
+loss. Drop counts depend on thread scheduling. Closing the queue wakes blocked
+readers and writers and drains accepted frames before shutdown.
+
+The program prints produced, enqueued, consumed, dropped, currently queued, and
+queue high-watermark counts, followed by the last consumed frame. After a run,
+`produced = enqueued + dropped`, `enqueued = consumed`, and `queued = 0`.
+Queue storage remains bounded by `--capacity`; frames are not accumulated in
+memory. `--frames 0` is a valid empty run; capacity must be positive.
+
+CTest covers FIFO ordering, ring wraparound, overflow accounting, concurrent
+backpressure, shutdown wakeups and draining, deterministic samples, empty runs,
+and CLI validation. GitHub Actions builds and tests the C++ version alongside
+the Python checks.
+
+### Python simulator
+
 Python 3.11 or newer is required.
 
 ```bash
